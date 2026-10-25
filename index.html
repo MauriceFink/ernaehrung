@@ -122,6 +122,10 @@ input:focus{outline:none;border-color:var(--p)}
 #scrim.open{opacity:1;visibility:visible}
 #side{position:fixed;top:0;bottom:0;left:0;width:min(88vw,340px);background:var(--bg);z-index:31;transform:translateX(-102%);transition:transform .28s cubic-bezier(.2,.8,.2,1);padding:calc(env(safe-area-inset-top) + 16px) 20px 24px;overflow:auto;border-radius:0 28px 28px 0}
 #side.open{transform:none}
+.hrow{display:flex;align-items:center;justify-content:space-between}
+.hrow h2{margin:24px 4px 10px}
+.hrow .chip{margin-top:14px;background:var(--ink);color:var(--bg);font-weight:600}
+#hNote{margin:-2px 6px 8px}
 #side h4{font-size:15px;margin:26px 0 0;font-weight:800}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@zxing/browser@0.1.5/umd/zxing-browser.min.js" defer></script>
@@ -145,7 +149,8 @@ input:focus{outline:none;border-color:var(--p)}
       <div class="tile"><small><span class="dot bg-f"></span>Fett</small><b id="fVal"></b></div>
       <div class="tile"><small><span class="dot k"></span>Kalorien</small><b id="kVal"></b><em id="kSub"></em></div>
     </div>
-    <h2>Einträge</h2>
+    <div class="hrow"><h2>Einträge</h2><button class="chip" id="hSend">An Health senden</button></div>
+    <p class="cap" id="hNote"></p>
     <ul class="card" id="list"></ul>
   </section>
 
@@ -185,6 +190,8 @@ input:focus{outline:none;border-color:var(--p)}
     <label>Eiweiß max. (g/kg)<input id="sMax" inputmode="decimal"></label>
   </div>
   <label>Kalorienziel pro Tag<input id="sK" inputmode="numeric"></label>
+  <h4>Apple Health</h4>
+  <label>Name des Kurzbefehls<input id="sH" autocomplete="off"></label>
   <p class="msg" id="sNote"></p>
   <button class="btn pri wide" id="sSave">Speichern</button>
   <h4>Export für die Cloud</h4>
@@ -236,8 +243,8 @@ const isoDay = d => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOS
 let db = null;
 try { db = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
 db = db || {};
-db.settings = Object.assign({weight: 85, fMin: 1.5, fMax: 2, kcal: 2000}, db.settings);
-db.log = db.log || {}; db.products = db.products || {}; db.recent = db.recent || [];
+db.settings = Object.assign({weight: 85, fMin: 1.5, fMax: 2, kcal: 2000, hname: "Makros Health"}, db.settings);
+db.log = db.log || {}; db.products = db.products || {}; db.recent = db.recent || []; db.health = db.health || {};
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {} };
 
 let day = isoDay(new Date()), scanner = null, cur = {}, tab = "today", range = 7, calM = (d => (d.setDate(1), d))(new Date());
@@ -291,6 +298,7 @@ function renderToday(T) {
   $("#list").innerHTML = list.length ? list.slice().reverse().map(e =>
     `<li><div><b>${esc(e.name)}</b><small>${dec(e.g)} g, ${R(e.kcal)} kcal</small><small class="m"><span class="cp">Eiweiß ${dec(e.p)}</span><span class="cc">KH ${dec(e.c)}</span><span class="cf">Fett ${dec(e.f)}</span></small></div><button class="del" data-id="${e.id}" aria-label="Eintrag löschen">✕</button></li>`).join("")
     : `<li class="empty">Noch keine Einträge. Tippe unten auf „Scannen“.</li>`;
+  renderHealthNote();
 }
 
 function renderOver(T) {
@@ -495,7 +503,7 @@ function addEntry() {
 
 function openSettings() {
   const s = db.settings;
-  $("#sW").value = dec(s.weight); $("#sMin").value = dec(s.fMin); $("#sMax").value = dec(s.fMax); $("#sK").value = s.kcal;
+  $("#sW").value = dec(s.weight); $("#sMin").value = dec(s.fMin); $("#sMax").value = dec(s.fMax); $("#sK").value = s.kcal; $("#sH").value = s.hname;
   $("#sMsg").textContent = ""; settingsNote(); openSide();
 }
 function settingsNote() {
@@ -555,6 +563,29 @@ function backupLoad(file) {
   rd.readAsText(file);
 }
 
+/* ---------- Apple Health über Kurzbefehle ---------- */
+function sendHealth() {
+  const t = sumList(db.log[day] || []), sent = db.health[day] || {kcal: 0, p: 0, c: 0, f: 0};
+  const d1 = v => Math.max(0, Math.round(v * 10) / 10);
+  const dl = {kcal: Math.max(0, R(t.kcal - sent.kcal)), p: d1(t.p - sent.p), c: d1(t.c - sent.c), f: d1(t.f - sent.f)};
+  if (!dl.kcal && !dl.p && !dl.c && !dl.f) { $("#hNote").textContent = "Es gibt nichts Neues zu senden."; return; }
+  const now = new Date(), when = day === isoDay(now) ? now : new Date(day + "T12:00:00");
+  dl.date = isoDay(when) + "T" + when.toTimeString().slice(0, 8);
+  db.hPending = {day, tot: t}; save(); renderHealthNote();
+  location.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(db.settings.hname || "Makros Health") +
+    "&input=text&text=" + encodeURIComponent(JSON.stringify(dl));
+}
+
+function renderHealthNote() {
+  const hp = db.hPending, hs = db.health[day];
+  if (hp) {
+    const lbl = new Date(hp.day + "T12:00:00").toLocaleDateString("de-DE", {day: "numeric", month: "long"});
+    $("#hNote").innerHTML = `Hat der Kurzbefehl die Werte für ${lbl} gespeichert?<span class="chips"><button class="chip" data-h="ok">Ja</button><button class="chip" data-h="no">Nein</button></span>`;
+  } else {
+    $("#hNote").textContent = hs ? "In Apple Health gespeichert: " + R(hs.kcal) + " kcal, " + R(hs.p) + " g Eiweiß." : "";
+  }
+}
+
 /* ---------- Events ---------- */
 function shift(n) { const d = new Date(day + "T12:00:00"); d.setDate(d.getDate() + n); day = isoDay(d); render(); }
 $("#prev").onclick = () => shift(-1);
@@ -577,11 +608,22 @@ $("#liveBtn").onclick = startScan;
 $("#photoIn").addEventListener("change", e => { const f = e.target.files[0]; e.target.value = ""; if (f) decodePhoto(f); });
 $("#add").onclick = addEntry;
 $("#sSave").onclick = () => {
-  db.settings = {weight: num($("#sW").value) || 85, fMin: num($("#sMin").value) || 1.5, fMax: num($("#sMax").value) || 2, kcal: num($("#sK").value) || 2000};
+  db.settings = {weight: num($("#sW").value) || 85, fMin: num($("#sMin").value) || 1.5, fMax: num($("#sMax").value) || 2, kcal: num($("#sK").value) || 2000, hname: $("#sH").value.trim() || "Makros Health"};
   save(); closeSide(); render();
 };
 $("#export").onclick = exportCsv;
 $("#bkSave").onclick = backupSave;
+$("#hSend").onclick = sendHealth;
+$("#hNote").addEventListener("click", e => {
+  const a = e.target.dataset.h, hp = db.hPending;
+  if (!a || !hp) return;
+  if (a === "ok") {
+    const o = db.health[hp.day] || {kcal: 0, p: 0, c: 0, f: 0};
+    db.health[hp.day] = {kcal: Math.max(o.kcal, hp.tot.kcal), p: Math.max(o.p, hp.tot.p), c: Math.max(o.c, hp.tot.c), f: Math.max(o.f, hp.tot.f)};
+  }
+  db.hPending = null; save(); renderHealthNote();
+  if (a === "no") $("#hNote").textContent = "Nichts gespeichert. Prüfe Name und Aufbau des Kurzbefehls.";
+});
 $("#bkLoad").onclick = () => $("#bkFile").click();
 $("#bkFile").addEventListener("change", e => { const f = e.target.files[0]; if (f) backupLoad(f); e.target.value = ""; });
 ["#sW", "#sMin", "#sMax"].forEach(s => $(s).addEventListener("input", settingsNote));
