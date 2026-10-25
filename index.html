@@ -70,6 +70,7 @@ li.empty{color:var(--mute);display:block}
 .sh h3{margin:0;font-size:22px;font-weight:800}
 #reader{position:relative;width:100%;height:260px;background:#000;border-radius:10px;overflow:hidden}
 #cam{width:100%;height:100%;object-fit:cover;display:block}
+#cam.zoom{transform:scale(1.7)}
 .aim{position:absolute;left:6%;right:6%;top:50%;height:2px;background:rgba(255,60,60,.9)}
 .msg{color:var(--mute);font-size:15px;margin:8px 0;min-height:20px}
 label{display:block;font-size:14px;color:var(--mute);margin-top:12px}
@@ -124,6 +125,9 @@ input:focus{outline:none;border-color:var(--ink)}
   <div id="vScan">
     <div class="sh"><h3>Barcode scannen</h3><button class="ib" data-close>✕</button></div>
     <div id="reader"><video id="cam" playsinline muted autoplay></video><div class="aim"></div></div>
+    <button class="btn wide" id="photoBtn" style="margin-top:8px">Foto aufnehmen (scharf auch aus der Nähe)</button>
+    <button class="btn wide" id="liveBtn" hidden>Live-Scan neu starten</button>
+    <input type="file" id="photoIn" accept="image/*" capture="environment" hidden>
     <p class="msg" id="scanMsg"></p>
     <div class="inline"><input id="code" inputmode="numeric" placeholder="Oder Code eintippen"><button class="btn" id="codeGo">Suchen</button></div>
     <div id="recentWrap" hidden><label>Zuletzt gegessen</label><div class="chips" id="recent"></div></div>
@@ -156,7 +160,12 @@ input:focus{outline:none;border-color:var(--ink)}
     <label>Kalorienziel pro Tag<input id="sK" inputmode="numeric"></label>
     <p class="msg" id="sNote"></p>
     <button class="btn pri wide" id="sSave">Speichern</button>
-    <button class="btn wide" id="export">Daten als CSV sichern</button>
+    <label style="margin-top:22px">Sicherung</label>
+    <button class="btn wide" id="bkSave">Sicherung speichern</button>
+    <button class="btn wide" id="bkLoad">Sicherung laden</button>
+    <input type="file" id="bkFile" accept=".json,application/json" hidden>
+    <p class="msg" id="sMsg"></p>
+    <button class="btn wide" id="export">Als CSV exportieren (für Tabellen)</button>
   </div>
 </div></div>
 
@@ -241,17 +250,21 @@ function validEan(c) {
   return (10 - sum % 10) % 10 === chk;
 }
 
+function makeReader() {
+  const B = ZXingBrowser, hints = new Map();
+  hints.set(2, [B.BarcodeFormat.EAN_13, B.BarcodeFormat.EAN_8, B.BarcodeFormat.UPC_A]); // POSSIBLE_FORMATS
+  hints.set(3, true);                                                                     // TRY_HARDER
+  return new B.BrowserMultiFormatOneDReader(hints, {delayBetweenScanAttempts: 80});
+}
+
 async function startScan() {
   showView("vScan"); openSheet(); renderRecent();
-  $("#scanMsg").textContent = "Halte den Barcode quer, so nah, dass er fast die ganze Breite füllt.";
+  $("#liveBtn").hidden = true;
+  $("#scanMsg").textContent = "Halte das Handy etwa 15 bis 20 cm vom Barcode entfernt. Wird das Bild unscharf, geh lieber ein Stück zurück als näher heran.";
   if (!window.ZXingBrowser) { $("#scanMsg").textContent = "Der Scanner konnte nicht geladen werden. Prüfe die Internetverbindung oder tippe den Code ein."; return; }
   stopScan(); scanning = true;
   try {
-    const B = ZXingBrowser, hints = new Map();
-    hints.set(2, [B.BarcodeFormat.EAN_13, B.BarcodeFormat.EAN_8, B.BarcodeFormat.UPC_A]); // POSSIBLE_FORMATS
-    hints.set(3, true);                                                                     // TRY_HARDER
-    const reader = new B.BrowserMultiFormatOneDReader(hints, {delayBetweenScanAttempts: 80});
-    const ctl = await reader.decodeFromConstraints(
+    const ctl = await makeReader().decodeFromConstraints(
       {video: {facingMode: {ideal: "environment"}, width: {ideal: 1920}, height: {ideal: 1080}}},
       $("#cam"),
       res => {
@@ -262,10 +275,45 @@ async function startScan() {
       });
     if (!scanning) { ctl.stop(); return; }
     scanner = ctl;
+    /* Autofokus und Zoom nutzen, falls das Gerät sie anbietet; sonst wird nur die Vorschau vergrößert */
+    let zoomed = false;
+    try {
+      const track = $("#cam").srcObject.getVideoTracks()[0], cap = track.getCapabilities ? track.getCapabilities() : {}, adv = [];
+      if (cap.focusMode && cap.focusMode.includes("continuous")) adv.push({focusMode: "continuous"});
+      if (cap.zoom) adv.push({zoom: Math.min(cap.zoom.max, Math.max(cap.zoom.min, 2))});
+      if (adv.length) { await track.applyConstraints({advanced: adv}); zoomed = !!cap.zoom; }
+    } catch (e) {}
+    $("#cam").classList.toggle("zoom", !zoomed);
   } catch (e) {
     scanning = false; scanner = null;
     $("#scanMsg").textContent = "Kein Kamerazugriff. Erlaube die Kamera in den iPhone-Einstellungen unter Safari oder tippe den Code ein.";
   }
+}
+
+/* Foto aus der Kamera-App: scharf, auch aus kurzer Entfernung */
+async function decodePhoto(file) {
+  const msg = $("#scanMsg");
+  if (!window.ZXingBrowser) { msg.textContent = "Der Scanner konnte nicht geladen werden."; return; }
+  msg.textContent = "Foto wird ausgewertet …";
+  const src = URL.createObjectURL(file);
+  try {
+    const img = new Image(); img.src = src; await img.decode();
+    for (const max of [2200, 1400]) {
+      const k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+      const cv = document.createElement("canvas");
+      cv.width = Math.round(img.naturalWidth * k); cv.height = Math.round(img.naturalHeight * k);
+      cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height);
+      try {
+        const res = await makeReader().decodeFromImageUrl(cv.toDataURL("image/jpeg", 0.92));
+        const code = res.getText();
+        if (validEan(code)) { lookup(code); return; }
+      } catch (e) {}
+    }
+    msg.textContent = "Im Foto wurde kein Barcode erkannt. Der Code muss scharf und quer im Bild liegen. Versuche es noch einmal.";
+  } catch (e) {
+    msg.textContent = "Das Foto konnte nicht geladen werden.";
+  } finally { URL.revokeObjectURL(src); }
+  $("#liveBtn").hidden = false;
 }
 
 async function lookup(code) {
@@ -330,24 +378,63 @@ function addEntry() {
 function openSettings() {
   const s = db.settings;
   $("#sW").value = dec(s.weight); $("#sMin").value = dec(s.fMin); $("#sMax").value = dec(s.fMax); $("#sK").value = s.kcal;
-  settingsNote(); showView("vSet"); openSheet();
+  $("#sMsg").textContent = ""; settingsNote(); showView("vSet"); openSheet();
 }
 function settingsNote() {
   const w = num($("#sW").value), a = R(w * num($("#sMin").value)), b = R(w * num($("#sMax").value));
-  $("#sNote").textContent = "Eiweißziel: " + a + " bis " + b + " g pro Tag.";
+  $("#sNote").textContent = "Eiweißziel: " + a + " bis " + b + " g pro Tag. " +
+    (db.lastBackup ? "Letzte Sicherung: " + new Date(db.lastBackup + "T12:00:00").toLocaleDateString("de-DE") + "." : "Noch keine Sicherung erstellt.");
+}
+
+async function shareFile(file) {
+  try {
+    if (navigator.canShare && navigator.canShare({files: [file]})) { await navigator.share({files: [file], title: file.name}); return true; }
+  } catch (e) { if (e.name === "AbortError") return false; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(file); a.download = file.name;
+  document.body.appendChild(a); a.click(); a.remove();
+  return true;
 }
 
 async function exportCsv() {
   const rows = [["Datum", "Produkt", "Menge", "kcal", "Eiweiß_g", "Kohlenhydrate_g", "Fett_g"]];
   Object.keys(db.log).sort().forEach(d => db.log[d].forEach(e => rows.push([d, e.name, dec(e.g), R(e.kcal), dec(e.p), dec(e.c), dec(e.f)])));
   const csv = "\ufeff" + rows.map(r => r.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(";")).join("\n");
-  const file = new File([csv], "makros.csv", {type: "text/csv"});
-  try {
-    if (navigator.canShare && navigator.canShare({files: [file]})) { await navigator.share({files: [file], title: "Makros"}); return; }
-  } catch (e) { if (e.name === "AbortError") return; }
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(file); a.download = "makros.csv";
-  document.body.appendChild(a); a.click(); a.remove();
+  await shareFile(new File([csv], "makros.csv", {type: "text/csv"}));
+}
+
+async function backupSave() {
+  const stamp = isoDay(new Date());
+  const payload = JSON.stringify({app: "makros", version: 1, exported: new Date().toISOString(), data: db});
+  const ok = await shareFile(new File([payload], "makros-sicherung-" + stamp + ".json", {type: "application/json"}));
+  if (!ok) return;
+  db.lastBackup = stamp; save(); settingsNote();
+  $("#sMsg").textContent = "Wähle im Menü „In Dateien sichern“ und dann iCloud Drive, falls du es noch nicht getan hast.";
+}
+
+function backupLoad(file) {
+  const rd = new FileReader();
+  rd.onload = () => {
+    try {
+      const j = JSON.parse(rd.result), d = j && j.data;
+      if (!j || j.app !== "makros" || !d || typeof d.log !== "object") throw new Error("format");
+      let added = 0;
+      Object.keys(d.log).forEach(k => {
+        const have = db.log[k] = db.log[k] || [], ids = new Set(have.map(e => e.id));
+        (d.log[k] || []).forEach(e => { if (e && e.id && !ids.has(e.id)) { have.push(e); added++; } });
+      });
+      Object.assign(db.products, d.products || {});
+      const seen = new Set(db.recent.map(r => r.name));
+      (d.recent || []).forEach(r => { if (r && !seen.has(r.name)) db.recent.push(r); });
+      db.recent = db.recent.slice(0, 10);
+      if (d.settings) db.settings = Object.assign(db.settings, d.settings);
+      const s2 = db.settings;
+      $("#sW").value = dec(s2.weight); $("#sMin").value = dec(s2.fMin); $("#sMax").value = dec(s2.fMax); $("#sK").value = s2.kcal;
+      save(); render(); settingsNote();
+      $("#sMsg").textContent = added + " Einträge ergänzt. Vorhandene Einträge bleiben erhalten, Einstellungen stammen aus der Sicherung.";
+    } catch (e) { $("#sMsg").textContent = "Diese Datei ist keine gültige Sicherung."; }
+  };
+  rd.readAsText(file);
 }
 
 /* ---------- Events ---------- */
@@ -358,12 +445,18 @@ $("#gear").onclick = openSettings;
 $("#scan").onclick = startScan;
 $("#manual").onclick = () => openForm({}, "");
 $("#codeGo").onclick = () => { stopScan(); lookup($("#code").value); };
+$("#photoBtn").onclick = () => { stopScan(); $("#liveBtn").hidden = false; $("#photoIn").click(); };
+$("#liveBtn").onclick = startScan;
+$("#photoIn").addEventListener("change", e => { const f = e.target.files[0]; e.target.value = ""; if (f) decodePhoto(f); });
 $("#add").onclick = addEntry;
 $("#sSave").onclick = () => {
   db.settings = {weight: num($("#sW").value) || 85, fMin: num($("#sMin").value) || 1.5, fMax: num($("#sMax").value) || 2, kcal: num($("#sK").value) || 2000};
   save(); closeSheet(); render();
 };
 $("#export").onclick = exportCsv;
+$("#bkSave").onclick = backupSave;
+$("#bkLoad").onclick = () => $("#bkFile").click();
+$("#bkFile").addEventListener("change", e => { const f = e.target.files[0]; if (f) backupLoad(f); e.target.value = ""; });
 ["#sW", "#sMin", "#sMax"].forEach(s => $(s).addEventListener("input", settingsNote));
 ["#fKcal", "#fP", "#fC", "#fF", "#fG"].forEach(s => $(s).addEventListener("input", preview));
 $("#sheet").addEventListener("click", e => {
@@ -388,6 +481,7 @@ $("#list").addEventListener("click", e => {
   $("#icon").href = c.toDataURL("image/png");
 })();
 
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 render();
 </script>
 </body>
