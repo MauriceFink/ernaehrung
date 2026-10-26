@@ -49,7 +49,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 h2{font-size:20px;font-weight:800;margin:24px 4px 10px}
 .card{background:var(--card);border-radius:26px;box-shadow:var(--sh);padding:6px 18px}
 ul.card{list-style:none;margin:0}
-li[data-k]{cursor:pointer}
+li[data-k],li[data-i]{cursor:pointer}
 li{display:flex;gap:10px;align-items:center;padding:13px 0;border-bottom:1px solid var(--line)}
 li:last-child{border-bottom:0}
 li>div{flex:1;min-width:0}
@@ -207,6 +207,7 @@ input:focus{outline:none;border-color:var(--p)}
   <input type="file" id="bkFile" accept=".json,application/json" hidden>
   <button class="btn wide" id="export">Als CSV exportieren</button>
   <p class="msg" id="sMsg"></p>
+  <p class="cap" style="margin-top:22px">Version 26.10. mit Namenssuche</p>
 </aside>
 
 <div id="sheet"><div class="panel">
@@ -218,7 +219,16 @@ input:focus{outline:none;border-color:var(--p)}
     <input type="file" id="photoIn" accept="image/*" capture="environment" hidden>
     <p class="msg" id="scanMsg"></p>
     <div class="inline"><input id="code" inputmode="numeric" placeholder="Oder Code eintippen"><button class="btn" id="codeGo">Suchen</button></div>
+    <button class="btn wide" id="toSearch">Ohne Code: Produkt per Name suchen</button>
     <div id="recentWrap" hidden><label>Zuletzt gegessen</label><div class="chips" id="recent"></div></div>
+  </div>
+
+  <div id="vSearch" hidden>
+    <div class="sh"><h3>Produkt suchen</h3><button class="ib" data-close>✕</button></div>
+    <div class="inline"><input id="qIn" placeholder="z. B. Skyr oder Haferflocken" autocomplete="off" enterkeyhint="search"><button class="btn pri" id="qGo">Suchen</button></div>
+    <p class="msg" id="qMsg">Eigene Produkte erscheinen beim Tippen. Mit „Suchen“ durchsuchst du Open Food Facts.</p>
+    <ul class="card" id="qList" hidden></ul>
+    <button class="btn wide" id="qOwn">Selbst eintragen</button>
   </div>
 
   <div id="vForm" hidden>
@@ -389,7 +399,7 @@ function openSide() { $("#side").classList.add("open"); $("#scrim").classList.ad
 function closeSide() { $("#side").classList.remove("open"); $("#scrim").classList.remove("open"); }
 
 /* ---------- Sheet ---------- */
-const views = ["vScan", "vForm"];
+const views = ["vScan", "vForm", "vSearch"];
 const showView = id => views.forEach(v => $("#" + v).hidden = v !== id);
 const openSheet = () => $("#sheet").classList.add("open");
 function closeSheet() { stopScan(); $("#sheet").classList.remove("open"); }
@@ -628,6 +638,52 @@ function renderHealthNote() {
   }
 }
 
+/* ---------- Suche nach Namen ---------- */
+let qItems = [];
+function openSearch() {
+  stopScan(); showView("vSearch"); openSheet();
+  $("#qIn").value = ""; $("#qMsg").textContent = "Eigene Produkte erscheinen beim Tippen. Mit „Suchen“ durchsuchst du Open Food Facts.";
+  renderResults([]); setTimeout(() => $("#qIn").focus(), 250);
+}
+
+function renderResults(off) {
+  const q = $("#qIn").value.trim().toLowerCase();
+  const mine = !q ? [] : Object.entries(db.products).filter(([k, x]) => x && x.name && x.name.toLowerCase().includes(q))
+    .sort((a, b) => (b[1].used || 0) - (a[1].used || 0)).slice(0, 8)
+    .map(([k, x]) => Object.assign({}, x, {barcode: k.startsWith("m:") ? "" : k, mine: true}));
+  qItems = mine.concat(off || []);
+  $("#qList").hidden = !qItems.length;
+  $("#qList").innerHTML = qItems.map((x, i) =>
+    `<li data-i="${i}"><div><b>${esc(x.name)}</b><small>${x.mine ? "Meine Produkte, " : ""}${R(x.kcal)} kcal pro 100 g</small><small class="m"><span class="cp">Eiweiß ${dec(x.p)}</span><span class="cc">KH ${dec(x.c)}</span><span class="cf">Fett ${dec(x.f)}</span></small></div></li>`).join("");
+}
+
+function offItem(p) {
+  const n = p.nutriments || {}, v = k => (n[k] != null && n[k] !== "" ? num(n[k]) : null);
+  let kcal = v("energy-kcal_100g");
+  if (kcal == null && v("energy_100g") != null) kcal = v("energy_100g") / 4.184;
+  const pr = v("proteins_100g"), c = v("carbohydrates_100g"), f = v("fat_100g");
+  if (kcal == null && [pr, c, f].every(x => x != null)) kcal = 4 * pr + 4 * c + 9 * f;
+  const name = String(p.product_name_de || p.product_name || "").trim();
+  if (!name || kcal == null) return null;
+  const b = p.brands ? String(Array.isArray(p.brands) ? p.brands[0] : p.brands.split(",")[0]).trim() : "";
+  return {barcode: String(p.code || ""), name: name + (b ? " (" + b + ")" : ""), kcal, p: pr, c, f, serving: num(p.serving_quantity)};
+}
+
+async function searchOff() {
+  const q = $("#qIn").value.trim();
+  if (q.length < 2) { $("#qMsg").textContent = "Bitte mindestens zwei Buchstaben eingeben."; return; }
+  $("#qMsg").textContent = "Suche in Open Food Facts …";
+  const F = "code,product_name,product_name_de,brands,nutriments,serving_quantity", E = encodeURIComponent;
+  const get = async (url, key) => { try { const j = await (await fetch(url)).json(); return j[key] || []; } catch (e) { return null; } };
+  let hits = await get("https://search.openfoodfacts.org/search?q=" + E(q + ' countries_tags:"en:germany"') + "&langs=de&page_size=15&fields=" + F, "hits");
+  if (!hits || !hits.length) hits = await get("https://search.openfoodfacts.org/search?q=" + E(q) + "&langs=de&page_size=15&fields=" + F, "hits");
+  if (!hits || !hits.length) hits = await get("https://world.openfoodfacts.org/cgi/search.pl?search_terms=" + E(q) + "&search_simple=1&action=process&json=1&page_size=15&fields=" + F, "products");
+  if (hits === null) { $("#qMsg").textContent = "Keine Verbindung zur Datenbank. Du kannst das Produkt selbst eintragen."; return; }
+  const items = hits.map(offItem).filter(x => x && !(x.barcode && db.products[x.barcode]));
+  $("#qMsg").textContent = items.length ? "Tippe ein Produkt an und prüfe die Werte." : "Nichts gefunden. Versuche einen anderen Begriff oder trage das Produkt selbst ein.";
+  renderResults(items);
+}
+
 /* ---------- Events ---------- */
 function shift(n) { const d = new Date(day + "T12:00:00"); d.setDate(d.getDate() + n); day = isoDay(d); render(); }
 $("#prev").onclick = () => shift(-1);
@@ -643,7 +699,16 @@ $("#cPrev").onclick = () => { calM.setMonth(calM.getMonth() - 1); render(); };
 $("#cNext").onclick = () => { calM.setMonth(calM.getMonth() + 1); render(); };
 $("#calGrid").addEventListener("click", e => { const b = e.target.closest("[data-d]"); if (b && !b.disabled) { day = b.dataset.d; go("today"); } });
 $("#scan").onclick = startScan;
-$("#manual").onclick = () => openForm({}, "");
+$("#manual").onclick = openSearch;
+$("#toSearch").onclick = openSearch;
+$("#qGo").onclick = searchOff;
+$("#qIn").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); searchOff(); } });
+$("#qIn").addEventListener("input", () => renderResults([]));
+$("#qOwn").onclick = () => openForm({name: $("#qIn").value.trim()}, "");
+$("#qList").addEventListener("click", e => {
+  const li = e.target.closest("li[data-i]"), x = li && qItems[+li.dataset.i];
+  if (x) openForm(Object.assign({}, x), x.mine ? "" : "Aus Open Food Facts. Bitte Werte prüfen und die Menge angeben.");
+});
 $("#codeGo").onclick = () => { stopScan(); lookup($("#code").value); };
 $("#photoBtn").onclick = () => { stopScan(); $("#liveBtn").hidden = false; $("#photoIn").click(); };
 $("#liveBtn").onclick = startScan;
