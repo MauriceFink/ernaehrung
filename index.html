@@ -49,6 +49,7 @@ button{font:inherit;color:inherit;cursor:pointer}
 h2{font-size:20px;font-weight:800;margin:24px 4px 10px}
 .card{background:var(--card);border-radius:26px;box-shadow:var(--sh);padding:6px 18px}
 ul.card{list-style:none;margin:0}
+li[data-k]{cursor:pointer}
 li{display:flex;gap:10px;align-items:center;padding:13px 0;border-bottom:1px solid var(--line)}
 li:last-child{border-bottom:0}
 li>div{flex:1;min-width:0}
@@ -162,6 +163,11 @@ input:focus{outline:none;border-color:var(--p)}
     <div id="stats"></div>
   </section>
 
+  <section id="v-prod" hidden>
+    <input id="pSearch" placeholder="Produkt suchen" autocomplete="off" style="margin:0 0 12px">
+    <ul class="card" id="pList"></ul>
+  </section>
+
   <section id="v-cal" hidden>
     <div class="calh"><button class="ib" id="cPrev" aria-label="Vorheriger Monat">‹</button><b id="calTitle"></b><button class="ib" id="cNext" aria-label="Nächster Monat">›</button></div>
     <div class="card"><div class="g7" id="calGrid"></div></div>
@@ -178,6 +184,7 @@ input:focus{outline:none;border-color:var(--p)}
 <nav class="tabs" id="tabs">
   <button class="on" data-t="today"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/></svg>Heute</button>
   <button data-t="over"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9h-9z"/><path d="M15 3.5A9 9 0 0 1 20.5 9H15z"/></svg>Übersicht</button>
+  <button data-t="prod"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 9h14l-1.5 10.5h-11z"/><path d="M9 9l3-5 3 5"/></svg>Produkte</button>
   <button data-t="cal"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="15" rx="3"/><path d="M4 10h16M9 3v4M15 3v4"/></svg>Kalender</button>
 </nav>
 
@@ -245,6 +252,26 @@ try { db = JSON.parse(localStorage.getItem(KEY)); } catch (e) {}
 db = db || {};
 db.settings = Object.assign({weight: 85, fMin: 1.5, fMax: 2, kcal: 2000, hname: "Makros Health"}, db.settings);
 db.log = db.log || {}; db.products = db.products || {}; db.recent = db.recent || []; db.health = db.health || {};
+if (!db.libV) {
+  const cnt = {}, last = {}, sample = {};
+  Object.keys(db.log).forEach(k => db.log[k].forEach(e => {
+    cnt[e.name] = (cnt[e.name] || 0) + 1;
+    const t = new Date(k + "T12:00:00").getTime();
+    if (!(last[e.name] > t)) { last[e.name] = t; sample[e.name] = e; }
+  }));
+  const have = new Set(Object.values(db.products).map(x => x.name));
+  Object.keys(cnt).forEach(n => {
+    const e = sample[n];
+    if (!have.has(n) && e.g > 0) db.products["m:" + n.toLowerCase()] = {name: n, kcal: e.kcal / e.g * 100, p: e.p / e.g * 100, c: e.c / e.g * 100, f: e.f / e.g * 100};
+  });
+  Object.values(db.products).forEach(x => { if (x.used == null) { x.used = cnt[x.name] || 0; x.last = last[x.name] || 0; } });
+  db.libV = 1;
+}
+if (db.hPending) {
+  const o = db.health[db.hPending.day] || {kcal: 0, p: 0, c: 0, f: 0}, n = db.hPending.tot;
+  db.health[db.hPending.day] = {kcal: Math.max(o.kcal, n.kcal), p: Math.max(o.p, n.p), c: Math.max(o.c, n.c), f: Math.max(o.f, n.f)};
+  db.hPending = null;
+}
 const save = () => { try { localStorage.setItem(KEY, JSON.stringify(db)); } catch (e) {} };
 
 let day = isoDay(new Date()), scanner = null, cur = {}, tab = "today", range = 7, calM = (d => (d.setDate(1), d))(new Date());
@@ -263,12 +290,13 @@ function render() {
   document.querySelector(".fabs").hidden = tab !== "today";
   if (tab === "today") renderToday(T);
   else if (tab === "over") { $("#dLabel").textContent = "Übersicht"; $("#dDate").textContent = "Deine Makros im Zeitraum"; renderOver(T); }
+  else if (tab === "prod") renderProd();
   else { $("#dLabel").textContent = "Kalender"; $("#dDate").textContent = "Wann das Proteinziel erreicht wurde"; renderCal(T); }
 }
 
 function go(t) {
   tab = t;
-  ["today", "over", "cal"].forEach(n => $("#v-" + n).hidden = n !== t);
+  ["today", "over", "prod", "cal"].forEach(n => $("#v-" + n).hidden = n !== t);
   document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === t));
   window.scrollTo(0, 0); render();
 }
@@ -345,6 +373,16 @@ function renderCal(T) {
     else if (isoDay(d) !== today) break;
   }
   $("#calSum").textContent = hit + " von " + tracked + " erfassten Tagen mit Proteinziel" + (streak ? ", aktuelle Serie: " + streak + (streak === 1 ? " Tag" : " Tage") : "");
+}
+
+function renderProd() {
+  $("#dLabel").textContent = "Produkte"; $("#dDate").textContent = "Antippen, um sie heute hinzuzufügen";
+  const q = $("#pSearch").value.trim().toLowerCase(), all = Object.entries(db.products).filter(([k, x]) => x && x.name);
+  const items = all.filter(([k, x]) => x.name.toLowerCase().includes(q))
+    .sort((a, b) => (b[1].last || 0) - (a[1].last || 0) || a[1].name.localeCompare(b[1].name, "de"));
+  $("#pList").innerHTML = items.length ? items.map(([k, x]) =>
+    `<li data-k="${esc(k)}"><div><b>${esc(x.name)}</b><small>${R(x.kcal)} kcal pro 100 g, ${x.used ? x.used + "× gegessen" : "noch nicht gegessen"}</small><small class="m"><span class="cp">Eiweiß ${dec(x.p)}</span><span class="cc">KH ${dec(x.c)}</span><span class="cf">Fett ${dec(x.f)}</span></small></div><button class="del" data-del="${esc(k)}" aria-label="Produkt entfernen">✕</button></li>`).join("")
+    : `<li class="empty">${all.length ? "Kein Treffer." : "Hier erscheinen alle Produkte, die du scannst oder einträgst."}</li>`;
 }
 
 function openSide() { $("#side").classList.add("open"); $("#scrim").classList.add("open"); }
@@ -496,9 +534,11 @@ function addEntry() {
   const k = g / 100;
   (db.log[day] = db.log[day] || []).push({id: Date.now() + Math.random().toString(36).slice(2, 6), name, g, kcal: v.kcal * k, p: v.p * k, c: v.c * k, f: v.f * k});
   const prod = Object.assign({name}, v);
-  if (cur.barcode) db.products[cur.barcode] = prod;
+  const key = cur.barcode || "m:" + name.toLowerCase(), old = db.products[key] || {};
+  db.products[key] = Object.assign(prod, {used: (old.used || 0) + 1, last: Date.now()});
   db.recent = [Object.assign({barcode: cur.barcode || ""}, prod)].concat(db.recent.filter(r => r.name !== name)).slice(0, 10);
-  save(); closeSheet(); render();
+  save(); closeSheet();
+  if (tab !== "today") go("today"); else render();
 }
 
 function openSettings() {
@@ -571,18 +611,20 @@ function sendHealth() {
   if (!dl.kcal && !dl.p && !dl.c && !dl.f) { $("#hNote").textContent = "Es gibt nichts Neues zu senden."; return; }
   const now = new Date(), when = day === isoDay(now) ? now : new Date(day + "T12:00:00");
   dl.date = isoDay(when) + "T" + when.toTimeString().slice(0, 8);
-  db.hPending = {day, tot: t}; save(); renderHealthNote();
+  db.hLast = {day, prev: sent};   /* sofort merken, damit nichts doppelt gesendet wird */
+  db.health[day] = {kcal: Math.max(sent.kcal, t.kcal), p: Math.max(sent.p, t.p), c: Math.max(sent.c, t.c), f: Math.max(sent.f, t.f)};
+  save(); renderHealthNote();
   location.href = "shortcuts://run-shortcut?name=" + encodeURIComponent(db.settings.hname || "Makros Health") +
     "&input=text&text=" + encodeURIComponent(JSON.stringify(dl));
 }
 
 function renderHealthNote() {
-  const hp = db.hPending, hs = db.health[day];
-  if (hp) {
-    const lbl = new Date(hp.day + "T12:00:00").toLocaleDateString("de-DE", {day: "numeric", month: "long"});
-    $("#hNote").innerHTML = `Hat der Kurzbefehl die Werte für ${lbl} gespeichert?<span class="chips"><button class="chip" data-h="ok">Ja</button><button class="chip" data-h="no">Nein</button></span>`;
+  const hl = db.hLast, hs = db.health[day];
+  if (hl) {
+    const lbl = new Date(hl.day + "T12:00:00").toLocaleDateString("de-DE", {day: "numeric", month: "long"});
+    $("#hNote").innerHTML = `Gesendet für ${lbl}. Hat es nicht geklappt?<span class="chips"><button class="chip" data-h="undo">Zurücksetzen</button><button class="chip" data-h="ok">Passt</button></span>`;
   } else {
-    $("#hNote").textContent = hs ? "In Apple Health gespeichert: " + R(hs.kcal) + " kcal, " + R(hs.p) + " g Eiweiß." : "";
+    $("#hNote").textContent = hs ? "An Apple Health gesendet: " + R(hs.kcal) + " kcal, " + R(hs.p) + " g Eiweiß." : "";
   }
 }
 
@@ -614,15 +656,24 @@ $("#sSave").onclick = () => {
 $("#export").onclick = exportCsv;
 $("#bkSave").onclick = backupSave;
 $("#hSend").onclick = sendHealth;
-$("#hNote").addEventListener("click", e => {
-  const a = e.target.dataset.h, hp = db.hPending;
-  if (!a || !hp) return;
-  if (a === "ok") {
-    const o = db.health[hp.day] || {kcal: 0, p: 0, c: 0, f: 0};
-    db.health[hp.day] = {kcal: Math.max(o.kcal, hp.tot.kcal), p: Math.max(o.p, hp.tot.p), c: Math.max(o.c, hp.tot.c), f: Math.max(o.f, hp.tot.f)};
+$("#pSearch").addEventListener("input", render);
+$("#pList").addEventListener("click", e => {
+  const del = e.target.dataset.del;
+  if (del) {
+    if (confirm("Produkt aus der Liste entfernen? Bisherige Einträge bleiben erhalten.")) { delete db.products[del]; save(); render(); }
+    return;
   }
-  db.hPending = null; save(); renderHealthNote();
-  if (a === "no") $("#hNote").textContent = "Nichts gespeichert. Prüfe Name und Aufbau des Kurzbefehls.";
+  const li = e.target.closest("li[data-k]"), x = li && db.products[li.dataset.k];
+  if (!x) return;
+  day = isoDay(new Date());
+  openForm(Object.assign({}, x, {barcode: li.dataset.k.startsWith("m:") ? "" : li.dataset.k}), "");
+});
+$("#hNote").addEventListener("click", e => {
+  const a = e.target.dataset.h, hl = db.hLast;
+  if (!a || !hl) return;
+  if (a === "undo") db.health[hl.day] = hl.prev;
+  db.hLast = null; save(); renderHealthNote();
+  if (a === "undo") $("#hNote").textContent = "Zurückgesetzt. Der nächste Versand sendet diese Werte erneut.";
 });
 $("#bkLoad").onclick = () => $("#bkFile").click();
 $("#bkFile").addEventListener("change", e => { const f = e.target.files[0]; if (f) backupLoad(f); e.target.value = ""; });
